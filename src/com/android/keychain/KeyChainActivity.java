@@ -20,20 +20,25 @@ import android.annotation.NonNull;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.PendingIntent;
+import android.app.admin.DevicePolicyEventLogger;
+import android.app.admin.DevicePolicyManager;
 import android.app.admin.IDevicePolicyManager;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.pm.UserInfo;
 import android.content.res.Resources;
 import android.net.Uri;
 import android.os.AsyncTask;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.RemoteException;
 import android.os.ServiceManager;
-import android.security.Credentials;
+import android.os.UserManager;
 import android.security.IKeyChainAliasCallback;
 import android.security.KeyChain;
-import android.security.KeyStore;
+import android.stats.devicepolicy.DevicePolicyEnums;
 import android.util.Log;
 import android.view.ContextThemeWrapper;
 import android.view.LayoutInflater;
@@ -47,19 +52,24 @@ import android.widget.TextView;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.keychain.internal.KeyInfoProvider;
+
 import org.bouncycastle.asn1.x509.X509Name;
 
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
 import java.io.IOException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
-import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 import javax.security.auth.x500.X500Principal;
@@ -68,6 +78,7 @@ public class KeyChainActivity extends Activity {
     private static final String TAG = "KeyChain";
 
     private int mSenderUid;
+    private String mSenderPackageName;
 
     private PendingIntent mSender;
 
@@ -75,11 +86,26 @@ public class KeyChainActivity extends Activity {
     // get do file I/O in the remote keystore process and while they
     // do not cause StrictMode violations, they logically should not
     // be done on the UI thread.
-    private KeyStore mKeyStore = KeyStore.getInstance();
+    private final KeyStore mKeyStore = getKeyStore();
+
+    private static KeyStore getKeyStore() {
+        try {
+            final KeyStore keystore = KeyStore.getInstance("AndroidKeyStore");
+            keystore.load(null);
+            return keystore;
+        } catch (KeyStoreException | IOException | NoSuchAlgorithmException
+                | CertificateException e) {
+            Log.e(TAG, "Error opening AndroidKeyStore.", e);
+            throw new RuntimeException("Error opening AndroidKeyStore.", e);
+        }
+    }
 
     // A dialog to show the user while the KeyChain Activity is loading the
     // certificates.
     AlertDialog mLoadingDialog;
+
+    private ExecutorService executor = Executors.newSingleThreadExecutor();
+    private Handler handler = new Handler(Looper.getMainLooper());
 
     @Override public void onResume() {
         super.onResume();
@@ -91,8 +117,9 @@ public class KeyChainActivity extends Activity {
             return;
         }
         try {
+            mSenderPackageName = mSender.getIntentSender().getTargetPackage();
             mSenderUid = getPackageManager().getPackageInfo(
-                    mSender.getIntentSender().getTargetPackage(), 0).applicationInfo.uid;
+                    mSenderPackageName, 0).applicationInfo.uid;
         } catch (PackageManager.NameNotFoundException e) {
             // if unable to find the sender package info bail,
             // we need to identify the app to the user securely.
@@ -196,24 +223,88 @@ public class KeyChainActivity extends Activity {
 
         // Show a dialog to the user to indicate long-running task.
         showLoadingDialog();
-        // Give a profile or device owner the chance to intercept the request, if a private key
-        // access listener is registered with the DevicePolicyManagerService.
-        IDevicePolicyManager devicePolicyManager = IDevicePolicyManager.Stub.asInterface(
-                ServiceManager.getService(Context.DEVICE_POLICY_SERVICE));
-
         Uri uri = getIntent().getParcelableExtra(KeyChain.EXTRA_URI);
         String alias = getIntent().getStringExtra(KeyChain.EXTRA_ALIAS);
-        try {
-            devicePolicyManager.choosePrivateKeyAlias(mSenderUid, uri, alias, callback);
-        } catch (RemoteException e) {
-            Log.e(TAG, "Unable to request alias from DevicePolicyManager", e);
-            // Proceed without a suggested alias.
+
+        if (isManagedDevice()) {
+            // Give a profile or device owner the chance to intercept the request, if a private key
+            // access listener is registered with the DevicePolicyManagerService.
+            IDevicePolicyManager devicePolicyManager = IDevicePolicyManager.Stub.asInterface(
+                    ServiceManager.getService(Context.DEVICE_POLICY_SERVICE));
             try {
-                callback.alias(null);
-            } catch (RemoteException shouldNeverHappen) {
-                finish(null);
+                devicePolicyManager.choosePrivateKeyAlias(mSenderUid, uri, alias, callback);
+            } catch (RemoteException e) {
+                Log.e(TAG, "Unable to request alias from DevicePolicyManager", e);
+                // Proceed without a suggested alias.
+                try {
+                    callback.alias(null);
+                } catch (RemoteException shouldNeverHappen) {
+                    finish(null);
+                }
+            }
+        } else {
+            // If the device is unmanaged, check whether the credential management app has provided
+            // an alias for the given uri and calling package name.
+            getAliasFromCredentialManagementApp(uri, callback);
+        }
+    }
+
+    private boolean isManagedDevice() {
+        DevicePolicyManager devicePolicyManager = getSystemService(DevicePolicyManager.class);
+        return devicePolicyManager.getDeviceOwner() != null
+                || devicePolicyManager.getProfileOwner() != null
+                || hasManagedProfile();
+    }
+
+    private boolean hasManagedProfile() {
+        UserManager userManager = getSystemService(UserManager.class);
+        for (final UserInfo userInfo : userManager.getProfiles(getUserId())) {
+            if (userInfo.isManagedProfile()) {
+                return true;
             }
         }
+        return false;
+    }
+
+    private void getAliasFromCredentialManagementApp(Uri uri,
+            IKeyChainAliasCallback.Stub callback) {
+        executor.execute(() -> {
+            try (KeyChain.KeyChainConnection keyChainConnection = KeyChain.bind(this)) {
+                String chosenAlias = null;
+                if (keyChainConnection.getService().hasCredentialManagementApp()) {
+                    Log.i(TAG, "There is a credential management app on the device. "
+                            + "Looking for an alias in the policy.");
+                    chosenAlias = keyChainConnection.getService()
+                            .getPredefinedAliasForPackageAndUri(mSenderPackageName, uri);
+                    if (chosenAlias != null) {
+                        keyChainConnection.getService().setGrant(mSenderUid, chosenAlias, true);
+                        Log.w(TAG, String.format("Selected alias %s from the "
+                                + "credential management app's policy", chosenAlias));
+                        DevicePolicyEventLogger
+                                .createEvent(DevicePolicyEnums
+                                        .CREDENTIAL_MANAGEMENT_APP_CREDENTIAL_FOUND_IN_POLICY)
+                                .write();
+                    } else {
+                        Log.i(TAG, "No alias provided from the credential management app");
+                    }
+                }
+                callback.alias(chosenAlias);
+            } catch (InterruptedException | RemoteException e) {
+                Log.e(TAG, "Unable to request find predefined alias from credential "
+                        + "management app policy");
+                // Proceed without a suggested alias.
+                try {
+                    callback.alias(null);
+                } catch (RemoteException shouldNeverHappen) {
+                    finish(null);
+                } finally {
+                    DevicePolicyEventLogger
+                            .createEvent(DevicePolicyEnums
+                                    .CREDENTIAL_MANAGEMENT_APP_POLICY_LOOKUP_FAILED)
+                            .write();
+                }
+            }
+        });
     }
 
     @VisibleForTesting
@@ -297,8 +388,8 @@ public class KeyChainActivity extends Activity {
         private final KeyInfoProvider mInfoProvider;
         private final CertificateParametersFilter mCertificateFilter;
 
-        public AliasLoader(KeyStore keyStore, Context context, KeyInfoProvider infoProvider,
-                CertificateParametersFilter certificateFilter) {
+        public AliasLoader(KeyStore keyStore, Context context,
+                KeyInfoProvider infoProvider, CertificateParametersFilter certificateFilter) {
           mKeyStore = keyStore;
           mContext = context;
           mInfoProvider = infoProvider;
@@ -306,10 +397,19 @@ public class KeyChainActivity extends Activity {
         }
 
         @Override protected CertificateAdapter doInBackground(Void... params) {
-            String[] aliasArray = mKeyStore.list(Credentials.USER_PRIVATE_KEY);
-            List<String> rawAliasList = ((aliasArray == null)
-                                      ? Collections.<String>emptyList()
-                                      : Arrays.asList(aliasArray));
+            final List<String> rawAliasList = new ArrayList<>();
+            try {
+                final Enumeration<String> aliases = mKeyStore.aliases();
+                while (aliases.hasMoreElements()) {
+                    final String alias = aliases.nextElement();
+                    if (mKeyStore.isKeyEntry(alias)) {
+                        rawAliasList.add(alias);
+                    }
+                }
+            } catch (KeyStoreException e) {
+                Log.e(TAG, "Error while loading entries from keystore. "
+                        + "List may be empty or incomplete.");
+            }
 
             return new CertificateAdapter(mKeyStore, mContext,
                     rawAliasList.stream().filter(mInfoProvider::isUserSelectable)
@@ -607,33 +707,51 @@ public class KeyChainActivity extends Activity {
     }
 
     private static X509Certificate loadCertificate(KeyStore keyStore, String alias) {
-        byte[] bytes = keyStore.get(Credentials.USER_CERTIFICATE + alias);
-        if (bytes == null) {
-            Log.i(TAG, String.format("Missing user certificate for key alias %s", alias));
-            return null;
-        }
-        InputStream in = new ByteArrayInputStream(bytes);
+        final Certificate cert;
         try {
-            CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            return (X509Certificate)cf.generateCertificate(in);
-        } catch (CertificateException ignored) {
-            Log.w(TAG, "Error generating certificate", ignored);
+            if (keyStore.isCertificateEntry(alias)) {
+                return null;
+            }
+            cert = keyStore.getCertificate(alias);
+        } catch (KeyStoreException e) {
+            Log.e(TAG, String.format("Error trying to retrieve certificate for \"%s\".", alias), e);
             return null;
         }
+        if (cert != null) {
+            if (cert instanceof X509Certificate) {
+                return (X509Certificate) cert;
+            } else {
+                Log.w(TAG, String.format("Certificate associated with alias \"%s\" is not X509.",
+                        alias));
+            }
+        }
+        return null;
     }
 
-    private static List<X509Certificate> loadCertificateChain(KeyStore keyStore, String alias) {
-        byte[] chainBytes = keyStore.get(Credentials.CA_CERTIFICATE + alias);
-        if (chainBytes == null) {
-            Log.i(TAG, String.format("Missing certificate chain for key alias %s", alias));
-            return Collections.emptyList();
-        }
-
+    private static List<X509Certificate> loadCertificateChain(KeyStore keyStore,
+            String alias) {
+        final Certificate[] certs;
+        final boolean isCertificateEntry;
         try {
-            return Credentials.convertFromPem(chainBytes);
-        } catch (IOException | CertificateException e) {
-            Log.w(TAG, String.format("Error parsing certificate chain for alias %s", alias), e);
+            isCertificateEntry = keyStore.isCertificateEntry(alias);
+            certs = keyStore.getCertificateChain(alias);
+        } catch (KeyStoreException e) {
+            Log.e(TAG, String.format("Error trying to retrieve certificate chain for \"%s\".",
+                    alias), e);
             return Collections.emptyList();
         }
+        final List<X509Certificate> result = new ArrayList<>();
+        // If this is a certificate entry we return the single certificate. Otherwise we trim the
+        // leaf and return only the rest of the chain.
+        for (int i = isCertificateEntry ? 0 : 1; i < certs.length; ++i) {
+            if (certs[i] instanceof X509Certificate) {
+                result.add((X509Certificate) certs[i]);
+            } else {
+                Log.w(TAG,"A certificate in the chain of alias \""
+                        + alias + "\" is not X509.");
+                return Collections.emptyList();
+            }
+        }
+        return result;
     }
 }
