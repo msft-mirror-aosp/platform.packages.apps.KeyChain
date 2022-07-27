@@ -59,7 +59,6 @@ import android.util.Log;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.Preconditions;
-import com.android.internal.widget.LockPatternUtils;
 import com.android.keychain.internal.ExistingKeysProvider;
 import com.android.keychain.internal.GrantsDatabase;
 import com.android.org.conscrypt.TrustedCertificateStore;
@@ -188,10 +187,8 @@ public class KeyChainService extends IntentService {
                 final Enumeration<String> aliases = mKeyStore.aliases();
                 while (aliases.hasMoreElements()) {
                     final String alias = aliases.nextElement();
-                    if (!alias.startsWith(LockPatternUtils.SYNTHETIC_PASSWORD_KEY_PREFIX)) {
-                        if (mKeyStore.isKeyEntry(alias)) {
-                            keyStoreAliases.add(alias);
-                        }
+                    if (mKeyStore.isKeyEntry(alias)) {
+                        keyStoreAliases.add(alias);
                     }
                 }
             } catch (KeyStoreException e) {
