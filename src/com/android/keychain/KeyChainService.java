@@ -742,6 +742,8 @@ public class KeyChainService extends IntentService {
 
         @Override public boolean setGrant(int uid, String alias, boolean granted) {
             Preconditions.checkCallAuthorization(isSystemUid(getCaller()), MSG_NOT_SYSTEM);
+            Preconditions.checkArgument(containsKeyPair(alias),
+                    "Alias not associated with a key.");
             mGrantsDb.setGrant(uid, alias, granted);
             if (!granted) {
                 try {
