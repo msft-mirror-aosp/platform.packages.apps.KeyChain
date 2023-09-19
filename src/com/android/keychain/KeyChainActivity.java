@@ -738,8 +738,9 @@ public class KeyChainActivity extends AppCompatActivity {
             } catch (IllegalArgumentException ignored) {
                 Log.d(TAG, "attempt to set grant on a non-existent alias", ignored);
                 respondWithAlias(null);
-            } catch (Exception ignored) {
-                // Catchall so we always call mKeyChainAliasResponse
+            } catch (Exception | AssertionError ignored) {
+                // Catchall so we always call mKeyChainAliasResponse.
+                // AssertionError is thrown in case of failure to connect to the service.
                 Log.e(TAG, "error while granting access", ignored);
                 respondWithAlias(null);
             }
