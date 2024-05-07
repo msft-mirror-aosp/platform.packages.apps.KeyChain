@@ -22,7 +22,7 @@ import android.os.IBinder;
 import android.os.RemoteException;
 import android.security.IKeyChainService;
 import android.security.KeyChain;
-import android.security.KeyStore;
+import android.security.keystore.KeyProperties;
 import android.security.keystore.ParcelableKeyGenParameterSpec;
 import android.util.Log;
 
@@ -49,7 +49,7 @@ public class KeyChainServiceTestSupport extends Service {
             Log.d(TAG, "installKeyPair");
             return performBlockingKeyChainCall(keyChainService -> {
                 return keyChainService.installKeyPair(
-                        privateKey, userCert, certChain, alias, KeyStore.UID_SELF);
+                        privateKey, userCert, certChain, alias, KeyProperties.UID_SELF);
             });
         }
 
