@@ -3,6 +3,7 @@
 //############################################################
 
 package {
+    default_team: "trendy_team_enterprise",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -14,4 +15,6 @@ android_robolectric_test {
     java_resource_dirs: ["config"],
 
     instrumentation_for: "KeyChain",
+
+    upstream: true,
 }
