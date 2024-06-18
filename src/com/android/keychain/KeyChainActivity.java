@@ -208,7 +208,7 @@ public class KeyChainActivity extends AppCompatActivity {
                     Log.e(TAG, "interrupted while checking if key is user-selectable", ignored);
                     Thread.currentThread().interrupt();
                     return false;
-                } catch (Exception ignored) {
+                } catch (Exception | AssertionError ignored) {
                     Log.e(TAG, "error while checking if key is user-selectable", ignored);
                     return false;
                 }
@@ -341,7 +341,7 @@ public class KeyChainActivity extends AppCompatActivity {
                     }
                 }
                 callback.alias(chosenAlias);
-            } catch (InterruptedException | RemoteException e) {
+            } catch (InterruptedException | RemoteException | AssertionError e) {
                 Log.e(TAG, "Unable to request find predefined alias from credential "
                         + "management app policy");
                 // Proceed without a suggested alias.
