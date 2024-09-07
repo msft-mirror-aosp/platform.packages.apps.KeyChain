@@ -35,7 +35,7 @@ android_test {
         "truth",
     ],
     libs: [
-        "android.test.base",
+        "android.test.base.stubs.system",
     ],
     test_suites: ["device-tests"],
     data: [
