@@ -37,6 +37,7 @@ import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.UserManager;
 import android.os.Process;
 import android.os.UserHandle;
 import android.security.AppUriAuthenticationPolicy;
@@ -508,8 +509,8 @@ public class KeyChainService extends IntentService {
          *            {@code android.security.keystore.KeyProperties.UID_SELF} to indicate
          *            installation into the current user's system Keystore instance, or {@code
          *            Process.WIFI_UID} to indicate installation into the main user's WiFi Keystore
-         *            instance. It is only valid to pass {@code Process.WIFI_UID} to the KeyChain
-         *            service on user 0.
+         *            instance. Only admin users are allowed to pass {@code Process.WIFI_UID} to
+         *            the KeyChain service.
          * @return Whether the operation succeeded or not.
          */
         @Override public boolean installKeyPair(@Nullable byte[] privateKey,
@@ -533,11 +534,10 @@ public class KeyChainService extends IntentService {
                 return false;
             }
 
-            if (uid == Process.WIFI_UID && UserHandle.myUserId() != UserHandle.USER_SYSTEM) {
-                Log.e(TAG, String.format(
-                        "Installation into the WiFi Keystore should be called from the primary "
-                                + "user, not user %d",
-                        UserHandle.myUserId()));
+            UserManager userManager = mContext.getSystemService(UserManager.class);
+            if (uid == Process.WIFI_UID && !userManager.isAdminUser()) {
+                Log.e(TAG,
+                    "Installation into the WiFi Keystore should be called from the admin user");
                 return false;
             }
 
