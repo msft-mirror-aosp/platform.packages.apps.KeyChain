@@ -16,7 +16,5 @@ android_robolectric_test {
 
     instrumentation_for: "KeyChain",
 
-    upstream: true,
-
     strict_mode: false,
 }
