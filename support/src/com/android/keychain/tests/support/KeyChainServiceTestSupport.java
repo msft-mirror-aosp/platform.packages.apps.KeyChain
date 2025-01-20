@@ -20,6 +20,7 @@ import android.app.Service;
 import android.content.Intent;
 import android.os.IBinder;
 import android.os.RemoteException;
+import android.os.UserHandle;
 import android.security.IKeyChainService;
 import android.security.KeyChain;
 import android.security.keystore.KeyProperties;
@@ -113,8 +114,9 @@ public class KeyChainServiceTestSupport extends Service {
     }
 
     private <T> T performBlockingKeyChainCall(KeyChainAction<T> action) throws RemoteException {
-        try (KeyChain.KeyChainConnection connection =
-        KeyChain.bind(KeyChainServiceTestSupport.this)) {
+        try (KeyChain.KeyChainConnection connection = KeyChain.bindAsUser(
+                KeyChainServiceTestSupport.this,
+                UserHandle.of(UserHandle.getCallingUserId()))) {
             return action.run(connection.getService());
         } catch (InterruptedException e) {
             // should never happen.
