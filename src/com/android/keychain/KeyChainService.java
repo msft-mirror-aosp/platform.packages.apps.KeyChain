@@ -37,6 +37,7 @@ import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.UserManager;
 import android.os.Process;
 import android.os.UserHandle;
 import android.security.AppUriAuthenticationPolicy;
@@ -533,11 +534,10 @@ public class KeyChainService extends IntentService {
                 return false;
             }
 
-            if (uid == Process.WIFI_UID && UserHandle.myUserId() != UserHandle.USER_SYSTEM) {
-                Log.e(TAG, String.format(
-                        "Installation into the WiFi Keystore should be called from the primary "
-                                + "user, not user %d",
-                        UserHandle.myUserId()));
+            UserManager userManager = mContext.getSystemService(UserManager.class);
+            if (uid == Process.WIFI_UID && !userManager.isAdminUser()) {
+                Log.e(TAG,
+                    "Installation into the WiFi Keystore should be called from the admin user");
                 return false;
             }
 
