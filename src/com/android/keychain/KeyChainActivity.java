@@ -18,11 +18,13 @@ package com.android.keychain;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.SuppressLint;
 import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.app.admin.DevicePolicyEventLogger;
 import android.app.admin.DevicePolicyManager;
+import android.app.admin.flags.Flags;
 import android.app.admin.IDevicePolicyManager;
 import android.content.Context;
 import android.content.DialogInterface;
@@ -236,44 +238,74 @@ public class KeyChainActivity extends AppCompatActivity {
                 new CertificateParametersFilter(mKeyStore, keyTypes, issuers));
         loader.execute();
 
-        final IKeyChainAliasCallback.Stub callback = new IKeyChainAliasCallback.Stub() {
-            @Override public void alias(String alias) {
-                Log.i(TAG, String.format("Alias provided by device policy client: %s", alias));
-                // Use policy-suggested alias if provided or abort further actions if alias is
-                // KeyChain.KEY_ALIAS_SELECTION_DENIED
-                if (alias != null) {
-                    finishWithAliasFromPolicy(alias);
-                    return;
-                }
+        final Boolean suppressCertificateSelection =
+                Flags.keychainSuppressCertificateSelection()
+                        && getIntent()
+                                .getBooleanExtra(
+                                        KeyChain.EXTRA_SUPPRESS_CERTIFICATE_SELECTION, false);
 
-                // No suggested alias - instead finish loading and show UI to pick one
-                final CertificateAdapter certAdapter;
-                try {
-                    certAdapter = loader.get();
-                } catch (InterruptedException | ExecutionException e) {
-                    Log.e(TAG, "Loading certificate aliases interrupted", e);
-                    finish(null);
-                    return;
-                }
-                /*
-                 * If there are no keys for the user to choose from, do not display
-                 * the dialog. This is in line with what other operating systems do.
-                 */
-                if (!certAdapter.hasKeysToChoose()) {
-                    Log.i(TAG, "No keys to choose from");
-                    finish(null);
-                    return;
-                }
-                runOnUiThread(() -> {
-                    finishSnackBar();
-                    displayCertChooserDialog(certAdapter);
-                });
-            }
-        };
+        final IKeyChainAliasCallback.Stub callback =
+                new IKeyChainAliasCallback.Stub() {
+                    @Override
+                    public void alias(String alias) {
+                        Log.i(
+                                TAG,
+                                String.format("Alias provided by device policy client: %s", alias));
+                        // Use policy-suggested alias if provided or abort further actions if alias
+                        // is
+                        // KeyChain.KEY_ALIAS_SELECTION_DENIED
+                        if (alias != null) {
+                            finishWithAliasFromPolicy(alias);
+                            return;
+                        }
+
+                        // No suggested alias - instead finish loading and show UI to pick one
+                        final CertificateAdapter certAdapter;
+                        try {
+                            certAdapter = loader.get();
+                        } catch (InterruptedException | ExecutionException e) {
+                            Log.e(TAG, "Loading certificate aliases interrupted", e);
+                            finish(null);
+                            return;
+                        }
+                        /*
+                         * If there are no keys for the user to choose from, do not display
+                         * the dialog. This is in line with what other operating systems do.
+                         */
+                        if (!certAdapter.hasKeysToChoose()) {
+                            Log.i(TAG, "No keys to choose from");
+                            finish(null);
+                            return;
+                        }
+                        if (suppressCertificateSelection) {
+                            /*
+                             * If suppressCertificateSelection is set to true, do not display
+                             * the dialog.
+                             */
+                            Log.i(TAG, "Suppressing certificate selection");
+                            finishWithError(
+                                    KeyChain.SELECTION_ERROR_CERTIFICATE_SELECTION_SUPPRESSED);
+                        } else {
+                            runOnUiThread(
+                                    () -> {
+                                        finishSnackBar();
+                                        displayCertChooserDialog(certAdapter);
+                                    });
+                        }
+                    }
+
+                    @Override
+                    public void onError(int error) {
+                        finishWithError(error);
+                    }
+                };
 
         // Show a snackbar to the user to indicate long-running task.
         if (mSnackbar == null) {
-            handler.postDelayed(mShowSnackBar, SNACKBAR_DELAY_TIME);
+            if (!suppressCertificateSelection) {
+                // Show a snackbar when user is not suppressing certificate selection.
+                handler.postDelayed(mShowSnackBar, SNACKBAR_DELAY_TIME);
+            }
         }
         Uri uri = getIntent().getParcelableExtra(KeyChain.EXTRA_URI);
         String alias = getIntent().getStringExtra(KeyChain.EXTRA_ALIAS);
@@ -676,14 +708,18 @@ public class KeyChainActivity extends AppCompatActivity {
     }
 
     private void finish(String alias) {
-        finish(alias, false);
+        finish(alias, false, KeyChain.SELECTION_ERROR_NONE);
     }
 
     private void finishWithAliasFromPolicy(String alias) {
-        finish(alias, true);
+        finish(alias, true, KeyChain.SELECTION_ERROR_NONE);
     }
 
-    private void finish(String alias, boolean isAliasFromPolicy) {
+    private void finishWithError(int error) {
+        finish(null, false, error);
+    }
+
+    private void finish(String alias, boolean isAliasFromPolicy, int error) {
         if (alias == null || alias.equals(KeyChain.KEY_ALIAS_SELECTION_DENIED)) {
             alias = null;
             setResult(RESULT_CANCELED);
@@ -696,7 +732,7 @@ public class KeyChainActivity extends AppCompatActivity {
                 = IKeyChainAliasCallback.Stub.asInterface(
                         getIntent().getIBinderExtra(KeyChain.EXTRA_RESPONSE));
         if (keyChainAliasResponse != null) {
-            new ResponseSender(keyChainAliasResponse, alias, isAliasFromPolicy).execute();
+            new ResponseSender(keyChainAliasResponse, alias, isAliasFromPolicy, error).execute();
             return;
         }
         finishActivity();
@@ -706,14 +742,27 @@ public class KeyChainActivity extends AppCompatActivity {
         private IKeyChainAliasCallback mKeyChainAliasResponse;
         private String mAlias;
         private boolean mFromPolicy;
+        private int mError;
 
-        private ResponseSender(IKeyChainAliasCallback keyChainAliasResponse, String alias,
-                boolean isFromPolicy) {
+        private ResponseSender(
+                IKeyChainAliasCallback keyChainAliasResponse,
+                String alias,
+                boolean isFromPolicy,
+                int error) {
             mKeyChainAliasResponse = keyChainAliasResponse;
             mAlias = alias;
             mFromPolicy = isFromPolicy;
+            mError = error;
         }
-        @Override protected Void doInBackground(Void... unused) {
+
+        @Override
+        protected Void doInBackground(Void... unused) {
+            if (Flags.keychainSuppressCertificateSelection()) {
+                if (mError != KeyChain.SELECTION_ERROR_NONE) {
+                    respondWithError(mError);
+                    return null;
+                }
+            }
             if (mAlias == null) {
                 respondWithAlias(null);
                 return null;
@@ -755,6 +804,17 @@ public class KeyChainActivity extends AppCompatActivity {
                 // throw back a RuntimeException across processes
                 // which we should protect against.
                 Log.e(TAG, "Error while returning alias", e);
+            }
+        }
+
+        private void respondWithError(int error) {
+            try {
+                mKeyChainAliasResponse.onError(error);
+            } catch (Exception e) {
+                // don't just catch RemoteException, caller could
+                // throw back a RuntimeException across processes
+                // which we should protect against.
+                Log.e(TAG, "Error while returning error", e);
             }
         }
 
