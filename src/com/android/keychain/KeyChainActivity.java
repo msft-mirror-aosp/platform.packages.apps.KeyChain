@@ -239,7 +239,7 @@ public class KeyChainActivity extends AppCompatActivity {
         loader.execute();
 
         final Boolean suppressCertificateSelection =
-                Flags.keychainSuppressCertificateSelection()
+                Flags.keychainSuppressCertificateSelections()
                         && getIntent()
                                 .getBooleanExtra(
                                         KeyChain.EXTRA_SUPPRESS_CERTIFICATE_SELECTION, false);
@@ -757,7 +757,7 @@ public class KeyChainActivity extends AppCompatActivity {
 
         @Override
         protected Void doInBackground(Void... unused) {
-            if (Flags.keychainSuppressCertificateSelection()) {
+            if (Flags.keychainSuppressCertificateSelections()) {
                 if (mError != KeyChain.SELECTION_ERROR_NONE) {
                     respondWithError(mError);
                     return null;
